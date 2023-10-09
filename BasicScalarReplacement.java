@@ -59,6 +59,7 @@ public class BasicScalarReplacement {
     public static Map<String, Integer> escapeStatusMethodMap = new HashMap<String, Integer>();
     public static Map<String, List<String>> objectReferencesMethodMap = new HashMap<String, List<String>>();
     public static List<String> staticFields = new ArrayList<String>();
+    public static EqualitySets equalitySets = new EqualitySets();
 
     
     public static void main(String[] args) {
@@ -102,6 +103,7 @@ public class BasicScalarReplacement {
             System.out.println(escapeStatusMethodMap);
             escapeStatusMethodMap.clear();
             replacementMap.clear();
+            equalitySets.clear();
             return method;
         }
     }
@@ -190,20 +192,38 @@ public class BasicScalarReplacement {
         updateEscapeStateHelper(varName, target, visited);
     }
 
-    private static void handleNewDeclaration(String name, String type){        
-        escapeStatusMethodMap.put(name, 0);
+    private static void handleNewDeclaration(String name, String type, int target){        
+        escapeStatusMethodMap.put(name, target);
         
         if (classMap.containsKey(type)){
             ClassOrInterfaceDeclaration classDeclaration = classMap.get(type);
             objectReferencesMethodMap.putIfAbsent(name, new ArrayList<String>());
-            for (FieldDeclaration fieldDeclaration : classDeclaration.getFields()){            
-                for (VariableDeclarator variableDeclarator : fieldDeclaration.getVariables()){
-                    String typeChild = variableDeclarator.getTypeAsString();
-                    String nameChild = name + "." + variableDeclarator.getNameAsString();
-                    handleNewDeclaration(nameChild, typeChild);
-                    objectReferencesMethodMap.get(name).add(nameChild);
+            for(ResolvedFieldDeclaration fieldDeclaration : classDeclaration.resolve().getAllFields()){
+                String declaringType = fieldDeclaration.declaringType().getClassName();
+                Optional<Node> fieldDec = fieldDeclaration.toAst();
+                if(fieldDec.isPresent()){
+                    FieldDeclaration fieldDeclaration2 = (FieldDeclaration)fieldDec.get();
+                    for (VariableDeclarator variableDeclarator : fieldDeclaration2.getVariables()){
+                        String typeChild = variableDeclarator.getTypeAsString();
+                        String tempname = name;
+                        if(!declaringType.equals(type)){
+                            tempname = "(("+declaringType+")"+tempname + ")";
+                        }
+                        String nameChild = tempname + "." + variableDeclarator.getNameAsString();
+                        System.out.println(nameChild);;
+                        handleNewDeclaration(nameChild, typeChild, target);
+                        objectReferencesMethodMap.get(name).add(nameChild);
+                    }
                 }
-            }
+        }
+            // for (FieldDeclaration fieldDeclaration : classDeclaration.getFields()){            
+            //     for (VariableDeclarator variableDeclarator : fieldDeclaration.getVariables()){
+            //         String typeChild = variableDeclarator.getTypeAsString();
+            //         String nameChild = name + "." + variableDeclarator.getNameAsString();
+            //         handleNewDeclaration(nameChild, typeChild, target);
+            //         objectReferencesMethodMap.get(name).add(nameChild);
+            //     }
+            // }
         }
         
     }
@@ -235,6 +255,7 @@ public class BasicScalarReplacement {
                     added += 1;
                     replacementMap.put(oldName + "." + originalName, varName + "_" + originalName);
                     if(classMap.containsKey(newType)){
+                        System.out.println(oldName + "." + originalName);
                         if(escapeStatusMethodMap.get(oldName + "." + originalName) <= 1){
                             added += replace(variableDeclarator_new.getNameAsString(), newType, statements, index1, oldName + "." + originalName);
                         }
@@ -254,7 +275,7 @@ public class BasicScalarReplacement {
                     VariableDeclarator variableDeclarator = variableDeclarationExpr.getVariable(i);
                     if(variableDeclarator.getInitializer().isPresent() && variableDeclarator.getInitializer().get() instanceof ObjectCreationExpr){
                         ObjectCreationExpr objectCreationExpr = (ObjectCreationExpr)variableDeclarator.getInitializer().get();
-                        String classType = objectCreationExpr.getTypeAsString();
+                        String classType = variableDeclarator.getTypeAsString();
                         String varName = variableDeclarator.getNameAsString();
                         if(escapeStatusMethodMap.get(varName) <= 1){
                             return replace(varName, classType, statements, index, varName);
@@ -272,6 +293,15 @@ public class BasicScalarReplacement {
                     fieldAccessExpr.replace(nameExpr);
                 }
             }
+            if(expression instanceof CastExpr){
+                CastExpr castExpr = (CastExpr) expression;
+                Expression castSubExpression = castExpr.getExpression();
+        //     if(castSubExpression instanceof ArrayAccessExpr){
+        //         castSubExpression = ((ArrayAccessExpr)castSubExpression).getName();
+        //     }
+            if (escapeStatusMethodMap.containsKey(castSubExpression.toString())){
+                System.out.println(castSubExpression);
+            }}
         }
         return 0;
     }
@@ -310,6 +340,8 @@ public class BasicScalarReplacement {
                         objectReferencesMethodMap.putIfAbsent(initializer.toString(), new ArrayList<String>());
                         objectReferencesMethodMap.get(variableDeclarator.getNameAsString()).add(initializer.toString());
                         objectReferencesMethodMap.get(initializer.toString()).add(variableDeclarator.getNameAsString());
+                        target = escapeStatusMethodMap.get(initializer.toString());
+                        equalitySets.addPair(variableDeclarator.getNameAsString(), initializer.toString());
                     }
                     else if(initializer instanceof ArrayCreationExpr){
                         Optional<ArrayInitializerExpr> optionalArrayInitializer = ((ArrayCreationExpr)initializer).getInitializer();
@@ -322,10 +354,14 @@ public class BasicScalarReplacement {
                                 }
                             }
                         }
+                        equalitySets.addPair(variableDeclarator.getNameAsString(), variableDeclarator.getNameAsString());
+                    }
+                    else if(initializer instanceof ObjectCreationExpr){
+                        equalitySets.addPair(variableDeclarator.getNameAsString(), variableDeclarator.getNameAsString());
                     }
                 }
                 escapeStatusMethodMap.put(variableDeclarator.getNameAsString(), target);
-                handleNewDeclaration(variableDeclarator.getNameAsString(), assignExpr.getCommonType().asString());
+                handleNewDeclaration(variableDeclarator.getNameAsString(), assignExpr.getCommonType().asString(), target);
             }
         }
 
@@ -334,8 +370,17 @@ public class BasicScalarReplacement {
             Expression value = assignExpr.getValue();
             Expression target = assignExpr.getTarget();
 
+            if (escapeStatusMethodMap.containsKey(value.toString()) && escapeStatusMethodMap.containsKey(target.toString())){
+                String rhs = value.toString();
+                String lhs = target.toString();
+                equalitySets.addPair(lhs, rhs);
+            }
             if(value instanceof ArrayAccessExpr){
                 value = ((ArrayAccessExpr)value).getName();
+                if(escapeStatusMethodMap.containsKey(target.toString())){
+                    String lhs = target.toString();
+                    equalitySets.addPair(lhs, null);
+                }
             }
 
             if(target instanceof ArrayAccessExpr){
@@ -355,18 +400,18 @@ public class BasicScalarReplacement {
             }
         }
 
-        else if (expression instanceof CastExpr){
-            CastExpr castExpr = (CastExpr) expression;
-            Expression castSubExpression = castExpr.getExpression();
-            if(castSubExpression instanceof ArrayAccessExpr){
-                castSubExpression = ((ArrayAccessExpr)castSubExpression).getName();
-            }
-            if (escapeStatusMethodMap.containsKey(castSubExpression.toString())){
-                if(escapeStatusMethodMap.get(castSubExpression.toString()) < 1){
-                    updateEscapeState(castSubExpression.toString(), 1);
-                }
-            }
-        }
+        // else if (expression instanceof CastExpr){
+        //     CastExpr castExpr = (CastExpr) expression;
+        //     Expression castSubExpression = castExpr.getExpression();
+        //     if(castSubExpression instanceof ArrayAccessExpr){
+        //         castSubExpression = ((ArrayAccessExpr)castSubExpression).getName();
+        //     }
+        //     if (escapeStatusMethodMap.containsKey(castSubExpression.toString())){
+        //         if(escapeStatusMethodMap.get(castSubExpression.toString()) < 1){
+        //             updateEscapeState(castSubExpression.toString(), 1);
+        //         }
+        //     }
+        // }
 
         else if (expression instanceof MethodCallExpr){
             MethodCallExpr methodCallExpr = (MethodCallExpr) expression;
@@ -483,8 +528,42 @@ public class BasicScalarReplacement {
                 }
             }
         }
+        System.out.println(escapeStatusMethodMap);
         for(int i = 0; i < statements.size(); i++){
             i += scalarReplace(statements, i);
         }
+    }
+}
+
+class EqualitySets{
+    Map<String, String> parent = new HashMap<String, String>();
+
+    String getParent(String q){
+        if(parent.get(q) == q){
+            return q;
+        }
+        else{
+            return getParent(parent.get(q));
+        }
+    }
+    int checkEqual(String a, String b){
+        if(getParent(b)!=null && getParent(b).equals(getParent(a))){
+            return 0;
+        }
+        else if(getParent(b)!=null && getParent(a)!=null){
+            return 1;
+        }
+        else{
+            return -1;
+        }
+    }
+    void addPair(String a, String b){
+        parent.put(a,b);
+        if(b!=null && !parent.containsKey(b)){
+            parent.put(b,b);
+        }
+    }
+    void clear(){
+        parent.clear();
     }
 }
